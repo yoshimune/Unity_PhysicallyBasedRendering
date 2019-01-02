@@ -7,6 +7,7 @@
 		_BumpMap("Normal Map", 2D) = "bump" {}
 		_Roughness("Roughness", Range(0, 1.0)) = 0.5
 		_Metallic("Metallic", Range(0, 1.0)) = 0.5
+		_Reflectance("Reflectance", Range(0, 1.0)) = 0.5
 	}
 	SubShader
 	{
@@ -22,6 +23,7 @@
 
 			#include "Lighting.cginc"
 			#include "UnityCG.cginc"
+#include "UnityStandardBRDF.cginc"
 
 			struct appdata
 			{
@@ -47,8 +49,13 @@
 			sampler2D _BumpMap;
 			float _Roughness;
 			float _Metallic;
+			float _Reflectance;
 
-			inline float D_GGX(float roughness, float NoH)
+
+			// 光学計算処理 ================================================
+			
+			// NDF GGX
+			float D_GGX(float roughness, float NoH)
 			{
 				float r2 = roughness * roughness;
 				float NoH2 = NoH * NoH;
@@ -57,6 +64,45 @@
 				return r2 / (UNITY_PI*k2);
 			}
 
+			// Visibility Term height-correlated SmithGGX
+			float V_SmithGGXCorrelated(float NoV, float NoL, float roughness)
+			{
+				float r2 = roughness * roughness;
+				float GGXV = NoL * sqrt(NoV * NoV * (1.0 - r2) + r2);
+				float GGXL = NoV * sqrt(NoL * NoL * (1.0 - r2) + r2);
+				return 0.5 / (GGXV + GGXL + 1e-5f);
+			}
+
+			// Visibility Term Fast height-correlated SmithGGX
+			float V_SmithGGXCorrelatedFast(float NoV, float NoL, float roughness)
+			{
+				float r = roughness;
+				float GGXV = NoL * (NoV * (1.0 - r) + r);
+				float GGXL = NoV * (NoL * (1.0 - r) + r);
+				return 0.5 / (GGXV + GGXL);
+			}
+
+			// f0値を取得する
+			float3 Fresnel0(float reflectance, float metallic, float3 baseColor)
+			{
+				float3 dielectrics = (0.16 * reflectance * reflectance) * float3(1.0, 1.0, 1.0);
+				return dielectrics * (1.0 - metallic) + (baseColor * metallic);
+			}
+
+			// Schlick近似式
+			float3 F_Schlick(float VoH, float3 f0, float3 f90)
+			{
+				return f0 + ((f90 - f0) * pow(1.0 - VoH, 5.0));
+			}
+
+			// 最適化Schlick近似式
+			float3 F_OptSchlick(float VoH, float3 f0)
+			{
+				float f = pow(1.0 - VoH, 5.0);
+				return float3(f,f,f) + (f0 * (1.0 - f));
+			}
+
+			// 頂点シェーダ =================================================
 			v2f vert(appdata v)
 			{
 				v2f o;
@@ -98,6 +144,7 @@
 				return o;
 			}
 
+			// フラグメントシェーダー ==========================================
 			half4 frag(v2f i) : SV_Target
 			{
 				// アルベドカラーを算出します
@@ -112,22 +159,45 @@
 				n.x = dot(i.tspace0, tnormal);
 				n.y = dot(i.tspace1, tnormal);
 				n.z = dot(i.tspace2, tnormal);
+				n = normalize(n);
 
 				// ライトの方向ベクトル
-				float3 l = _WorldSpaceLightPos0.xyz;
+				float3 l = normalize(_WorldSpaceLightPos0.xyz);
+				float NoL = saturate(dot(n, l));
 
 				// 視線ベクトル
-				float3 v = _WorldSpaceCameraPos;
+				float3 v = normalize(_WorldSpaceCameraPos);
+				float NoV = abs(dot(n, v) + 1e-5);
 
 				// ハーフベクトル
 				float3 h = normalize(l + v);
-
 				float NoH = saturate(dot(n, h));
+				float VoH = saturate(dot(v, h));
 
 				// 最終的に表現される色を算出します
-				// とりあえずNDFを表示します
+
+				// NDF
 				float D = D_GGX(_Roughness, NoH);
-				half4 col = half4(D,D,D,1.0);
+				//float D = GGXTerm(NoH, _Roughness);
+				
+				// Visibility Term
+				//float V = V_SmithGGXCorrelated(NoV, NoL, _Roughness);
+				float V = V_SmithGGXCorrelatedFast(NoV, NoL, _Roughness);
+				//float V = SmithJointGGXVisibilityTerm(NoL, NoV, _Roughness);
+
+				// Fresnel
+				float3 f0 = Fresnel0(_Reflectance, _Metallic, albedo);
+				float3 F = F_OptSchlick(VoH, f0);
+
+				// とりあえずD項だけ表示
+				//half4 col = half4(D, D, D, 1.0);
+
+				// とりあえずV項だけ表示
+				//half4 col = half4(V, V, V, 1.0);
+				
+				float3 specularTerm = D * V * F;
+				specularTerm = specularTerm;
+				half4 col = half4(specularTerm, 1.0);
 				return col;
 			}
 			ENDCG
