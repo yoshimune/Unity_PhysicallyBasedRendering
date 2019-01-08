@@ -57,11 +57,18 @@
 			// NDF GGX
 			float D_GGX(float roughness, float NoH)
 			{
-				float r2 = roughness * roughness;
-				float NoH2 = NoH * NoH;
-				float k = NoH2 * (r2 - 1.0) + 1.0;
-				float k2 = k * k;
-				return r2 / (UNITY_PI*k2);
+				float a = NoH * roughness;
+				float k = roughness / (1.0 - NoH * NoH + a * a);
+				return k * k * (1.0 / UNITY_PI);
+			}
+
+			// NDF 最適化 GGX
+			float D_OptGGX(float roughness, float NoH, const float3 n, const float3 h)
+			{
+				float3 NxH = cross(n, h);
+				float a = NoH * roughness;
+				float k = roughness / (dot(NxH, NxH) + a * a);
+				return k * k*(1.0 / UNITY_PI);
 			}
 
 			// Visibility Term height-correlated SmithGGX
@@ -100,6 +107,12 @@
 			{
 				float f = pow(1.0 - VoH, 5.0);
 				return float3(f,f,f) + (f0 * (1.0 - f));
+			}
+
+			// ランバート拡散反射
+			float Fd_Lambert()
+			{
+				return 1.0 / UNITY_PI;
 			}
 
 			// 頂点シェーダ =================================================
@@ -176,14 +189,12 @@
 
 				// 最終的に表現される色を算出します
 
+				// Specular Term ============================================
 				// NDF
-				float D = D_GGX(_Roughness, NoH);
-				//float D = GGXTerm(NoH, _Roughness);
+				float D = D_OptGGX(_Roughness, NoH, n, h);
 				
 				// Visibility Term
-				//float V = V_SmithGGXCorrelated(NoV, NoL, _Roughness);
 				float V = V_SmithGGXCorrelatedFast(NoV, NoL, _Roughness);
-				//float V = SmithJointGGXVisibilityTerm(NoL, NoV, _Roughness);
 
 				// Fresnel
 				float3 f0 = Fresnel0(_Reflectance, _Metallic, albedo);
@@ -196,9 +207,20 @@
 				//half4 col = half4(V, V, V, 1.0);
 				
 				float3 specularTerm = D * V * F;
-				specularTerm = specularTerm;
-				half4 col = half4(specularTerm, 1.0);
-				return col;
+
+
+				// Diffuse Term ============================================
+				float3 diffuseColor = (1.0 - _Metallic) * albedo.rgb;
+				float3 diffuseTerm = Fd_Lambert() * diffuseColor;
+
+
+				// Illuminance =============================================
+				float3 illuminance = _LightColor0 * NoL;
+
+
+				// 最終的な色を決定します。
+				half3 col = (specularTerm + diffuseTerm) * illuminance;
+				return half4(col, albedo.a);
 			}
 			ENDCG
 		}
